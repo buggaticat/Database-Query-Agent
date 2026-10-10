@@ -2,22 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypedDict
-from uuid import uuid4
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from pipeline.config import load_env_local
 from pipeline.guardrail import GuardrailJudgeClient, GuardrailStatus, evaluate_prompt
 from pipeline.parse.client import PromptParserClient
-from pipeline.parse.schema import ParseResult, ParseStatus, ParsedPrompt
+from pipeline.parse.schema import ParseResult, ParseStatus
 from pipeline.sql.client import SQLPlannerClient
 from pipeline.sql.executor import ResultWriter, execute_query_plan
 from pipeline.sql.schema import QueryResult
 
 
 class OrchestratorState(TypedDict, total=False):
-    thread_id: str
     user_prompt: str
     guarded_prompt: str
     guardrail_status: str
@@ -25,7 +22,6 @@ class OrchestratorState(TypedDict, total=False):
     guardrail_confidence: float
     parse_result: dict[str, Any]
     sql_result: dict[str, Any]
-    conversation_context: dict[str, Any]
     response: str
 
 
@@ -68,9 +64,8 @@ class Orchestrator:
         """Initialize the orchestrator and compile the execution graph."""
         load_env_local()
         self.dependencies = dependencies or OrchestratorDependencies()
-        self._checkpointer = MemorySaver()
         self._progress: ProgressCallback | None = None
-        self._graph = self._build_graph().compile(checkpointer=self._checkpointer)
+        self._graph = self._build_graph().compile()
 
     def _build_graph(self):
         """Build the state graph that drives request processing."""
@@ -84,38 +79,25 @@ class Orchestrator:
         graph.add_edge("sql", END)
         return graph
 
-    def run(self, prompt: str, thread_id: str | None = None) -> OrchestratorState:
+    def run(self, prompt: str) -> OrchestratorState:
         """Run the orchestrator without emitting progress events."""
-        return self.run_with_progress(prompt, thread_id=thread_id)
+        return self.run_with_progress(prompt)
 
     def run_with_progress(
         self,
         prompt: str,
-        thread_id: str | None = None,
         progress: ProgressCallback | None = None,
     ) -> OrchestratorState:
         """Run the orchestrator and optionally report stage progress."""
-        thread_id = thread_id or "thread-" + uuid4().hex
         self._progress = progress
         state = {
-            "thread_id": thread_id,
             "user_prompt": prompt,
-            "conversation_context": self._load_context(thread_id),
         }
-        config = {"configurable": {"thread_id": thread_id}}
         try:
-            result = self._graph.invoke(state, config=config)
+            result = self._graph.invoke(state)
         finally:
             self._progress = None
         return result
-
-    def _load_context(self, thread_id: str) -> dict[str, Any]:
-        """Load the conversation context stored for a thread."""
-        snapshot = self._checkpointer.get({"configurable": {"thread_id": thread_id}})
-        if not snapshot:
-            return {}
-        values = snapshot.get("channel_values") or {}
-        return values.get("conversation_context", {})
 
     def _guardrail_node(self, state: OrchestratorState) -> OrchestratorState:
         """Apply prompt guardrails before any parsing or SQL work."""
@@ -142,11 +124,9 @@ class Orchestrator:
         if self._progress:
             self._progress("Parsing prompt into structured query filters...")
         prompt = state.get("guarded_prompt", state["user_prompt"])
-        merged_prompt = self._merge_with_context(prompt, state.get("conversation_context", {}))
-        parse_result = self.dependencies.parser.parse(merged_prompt)
+        parse_result = self.dependencies.parser.parse(prompt)
         updated = dict(state)
-        updated["parse_result"] = parse_result.model_dump()
-        updated["conversation_context"] = self._update_context(state.get("conversation_context", {}), parse_result)
+        updated["parse_result"] = parse_result.model_dump(mode="json")
         if self._progress and parse_result.status == ParseStatus.OK and parse_result.parsed is not None:
             cameras = ", ".join(parse_result.parsed.camera_names) if parse_result.parsed.camera_names else "no camera filters"
             time_filters = (
@@ -164,7 +144,6 @@ class Orchestrator:
             )
             self._progress(f"Parsed prompt into cameras: {cameras}; time constraints: {time_filters}.")
         if parse_result.status == ParseStatus.OK and parse_result.parsed is not None:
-            updated["guarded_prompt"] = merged_prompt
             updated["response"] = "Parsed successfully."
         elif parse_result.status == ParseStatus.NEEDS_CLARIFICATION:
             updated["response"] = parse_result.clarification_question or "Please clarify your request."
@@ -191,29 +170,4 @@ class Orchestrator:
         updated["response"] = sql_result.result_file
         if self._progress:
             self._progress(f"Results extracted at {sql_result.result_file}")
-        return updated
-
-    def _merge_with_context(self, prompt: str, context: dict[str, Any]) -> str:
-        """Prepend prior conversation constraints to the current prompt."""
-        parts = []
-        if context.get("camera_names"):
-            parts.append("Previous cameras: " + ", ".join(context["camera_names"]))
-        if context.get("datetime_filters"):
-            parts.append("Previous time filters: " + ", ".join(context["datetime_filters"]))
-        if context.get("date_ranges"):
-            parts.append("Previous date ranges: " + ", ".join(context["date_ranges"]))
-        if context.get("recurrence_filters"):
-            parts.append("Previous recurrences: " + ", ".join(context["recurrence_filters"]))
-        parts.append("Current request: " + prompt)
-        return "\n".join(parts)
-
-    def _update_context(self, context: dict[str, Any], parse_result: ParseResult) -> dict[str, Any]:
-        """Merge parsed filters into the stored conversation context."""
-        if parse_result.parsed is None:
-            return context
-        updated = dict(context)
-        updated["camera_names"] = parse_result.parsed.camera_names or updated.get("camera_names", [])
-        updated["datetime_filters"] = [f.label for f in parse_result.parsed.datetime_filters] or updated.get("datetime_filters", [])
-        updated["date_ranges"] = [f.label for f in parse_result.parsed.date_ranges] or updated.get("date_ranges", [])
-        updated["recurrence_filters"] = [f.label for f in parse_result.parsed.recurrence_filters] or updated.get("recurrence_filters", [])
         return updated

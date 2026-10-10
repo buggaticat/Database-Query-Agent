@@ -35,7 +35,8 @@ class SQLPlannerClient:
                     "content": (
                         "You translate structured CCTV query filters into a read-only SQLite query plan. "
                         "Only target the frames table with columns frame_id, datetime, and camera_name. "
-                        "Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, or any mutating SQL. "
+                        "Only generate a single SELECT statement or a WITH clause that ends in SELECT. "
+                        "Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, TRUNCATE, ATTACH, DETACH, PRAGMA, VACUUM, REINDEX, BEGIN, COMMIT, or ROLLBACK. "
                         "Return only a structured query plan."
                     ),
                 },

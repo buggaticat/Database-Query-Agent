@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import asdict
 from pathlib import Path
+import re
 from typing import Iterable
 
 from pipeline.models import CCTVFrameRecord, CameraName, FrameDatetime, FrameID
 
 from .schema import QueryPlan, QueryPlanStatus, QueryResult
+
+
+READ_ONLY_SQL_FORBIDDEN_PATTERNS = (
+    re.compile(r"\b(insert|update|delete|drop|alter|create|truncate|replace|attach|detach|pragma|vacuum|reindex|begin|commit|rollback)\b", re.IGNORECASE),
+    re.compile(r"--|/\*|\*/"),
+)
 
 
 class ResultWriter:
@@ -65,6 +71,21 @@ def _quote_sql_parameter(parameter: str) -> str:
     return f"'{escaped}'"
 
 
+def _validate_read_only_sql(sql: str) -> str:
+    """Ensure the SQL is a single read-only query."""
+    normalized = " ".join(sql.strip().split())
+    if not normalized:
+        raise ValueError("Query plan SQL is empty.")
+    if ";" in normalized:
+        raise ValueError("Query plan SQL must be a single statement without semicolons.")
+    if not (normalized.lower().startswith("select ") or normalized.lower().startswith("with ")):
+        raise ValueError("Query plan SQL must start with SELECT or WITH.")
+    for pattern in READ_ONLY_SQL_FORBIDDEN_PATTERNS:
+        if pattern.search(normalized):
+            raise ValueError("Query plan SQL contains forbidden mutating or administrative syntax.")
+    return normalized
+
+
 def execute_query_plan(
     plan: QueryPlan,
     db_path: str | Path = Path("data") / "cctv_frames.db",
@@ -74,11 +95,14 @@ def execute_query_plan(
     if plan.status != QueryPlanStatus.OK or not plan.sql:
         raise ValueError("Query plan must be successful and include SQL.")
 
-    conn = sqlite3.connect(str(db_path))
+    sql = _validate_read_only_sql(plan.sql)
+    db_uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(db_uri, uri=True)
     conn.row_factory = sqlite3.Row
     try:
+        conn.execute("PRAGMA query_only = ON")
         rows = []
-        for row in conn.execute(plan.sql, plan.parameters):
+        for row in conn.execute(sql, plan.parameters):
             rows.append(
                 CCTVFrameRecord(
                     frame_id=FrameID(row["frame_id"]),
@@ -87,6 +111,6 @@ def execute_query_plan(
                 )
             )
         writer = writer or ResultWriter()
-        return writer.write(rows, _render_sql(plan.sql, plan.parameters))
+        return writer.write(rows, _render_sql(sql, plan.parameters))
     finally:
         conn.close()
