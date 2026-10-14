@@ -65,6 +65,7 @@ class Orchestrator:
         load_env_local()
         self.dependencies = dependencies or OrchestratorDependencies()
         self._progress: ProgressCallback | None = None
+        self._conversation_context: ParseResult | None = None
         self._graph = self._build_graph().compile()
 
     def _build_graph(self):
@@ -125,6 +126,8 @@ class Orchestrator:
             self._progress("Parsing prompt into structured query filters...")
         prompt = state.get("guarded_prompt", state["user_prompt"])
         parse_result = self.dependencies.parser.parse(prompt)
+        parse_result = self._merge_with_context(parse_result)
+        self._conversation_context = parse_result if parse_result.status == ParseStatus.OK else self._conversation_context
         updated = dict(state)
         updated["parse_result"] = parse_result.model_dump(mode="json")
         if self._progress and parse_result.status == ParseStatus.OK and parse_result.parsed is not None:
@@ -150,6 +153,28 @@ class Orchestrator:
         else:
             updated["response"] = parse_result.unsupported_reason or "Unsupported request."
         return updated
+
+    def _merge_with_context(self, parse_result: ParseResult) -> ParseResult:
+        """Carry forward missing filters from the latest successful turn."""
+        if parse_result.status != ParseStatus.OK or parse_result.parsed is None:
+            return parse_result
+
+        previous = self._conversation_context
+        if previous is None or previous.parsed is None:
+            return parse_result
+
+        current = parse_result.parsed
+        prior = previous.parsed
+        merged = current.model_copy(
+            update={
+                "camera_names": current.camera_names or prior.camera_names,
+                "datetime_filters": current.datetime_filters or prior.datetime_filters,
+                "date_ranges": current.date_ranges or prior.date_ranges,
+                "recurrence_filters": current.recurrence_filters or prior.recurrence_filters,
+                "notes": list(dict.fromkeys([*prior.notes, *current.notes])),
+            }
+        )
+        return parse_result.model_copy(update={"parsed": merged})
 
     def _route_after_parse(self, state: OrchestratorState) -> str:
         """Route to SQL planning only when parsing succeeds."""

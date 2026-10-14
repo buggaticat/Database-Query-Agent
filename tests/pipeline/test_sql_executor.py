@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from pipeline.sql.executor import ResultWriter, execute_query_plan
 from pipeline.sql.schema import QueryPlan, QueryPlanStatus
 
@@ -29,3 +31,22 @@ def test_execute_query_plan_writes_json_result(tmp_path: Path):
     assert payload["row_count"] == 1
     assert payload["results"][0]["camera_name"] == "Central Expressway (CTE)"
     assert payload["sql"] == "SELECT frame_id, datetime, camera_name FROM frames WHERE camera_name = 'Central Expressway (CTE)' ORDER BY datetime LIMIT 1"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "UPDATE frames SET camera_name = 'X'",
+        "DELETE FROM frames",
+        "DROP TABLE frames",
+        "PRAGMA journal_mode = WAL",
+        "SELECT frame_id FROM frames; DELETE FROM frames",
+        "SELECT frame_id FROM frames -- comment",
+    ],
+)
+def test_execute_query_plan_rejects_mutating_sql(tmp_path: Path, sql: str):
+    writer = ResultWriter(tmp_path)
+    plan = QueryPlan(status=QueryPlanStatus.OK, sql=sql)
+
+    with pytest.raises(ValueError):
+        execute_query_plan(plan, writer=writer)

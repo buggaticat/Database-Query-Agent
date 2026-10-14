@@ -68,7 +68,7 @@ class FakeGuardrailJudge:
         return self.judgment
 
 
-def test_orchestrator_keeps_context_across_turns():
+def test_orchestrator_carries_context_across_runs_and_merges_follow_ups():
     first = ParseResult(
         status=ParseStatus.OK,
         confidence=ParseConfidence.HIGH,
@@ -101,13 +101,16 @@ def test_orchestrator_keeps_context_across_turns():
     judge = FakeGuardrailJudge()
     orchestrator = Orchestrator(OrchestratorDependencies(parser=parser, sql_planner=planner, writer=writer, guardrail_judge=judge))
 
-    first_state = orchestrator.run("Show me frames from CTE.", thread_id="thread-1")
-    second_state = orchestrator.run("How about only those from this week?", thread_id="thread-1")
+    first_state = orchestrator.run("Show me frames from CTE.")
+    second_state = orchestrator.run("How about only those from this week?")
 
     assert first_state["response"] == "results/result_0.json"
     assert second_state["response"] == "results/result_0.json"
-    assert "Previous cameras: Central Expressway (CTE)" in parser.calls[1]
-    assert "Current request: How about only those from this week?" in parser.calls[1]
+    assert parser.calls[0] == "Show me frames from CTE."
+    assert parser.calls[1] == "How about only those from this week?"
+    assert planner.calls[0].parsed.camera_names == [CameraName.CTE]
+    assert planner.calls[1].parsed.camera_names == [CameraName.CTE]
+    assert planner.calls[1].parsed.date_ranges[0].label == "this week"
 
 
 def test_orchestrator_route_for_real_query_examples():
@@ -200,11 +203,11 @@ def test_orchestrator_route_for_real_query_examples():
         assert state["guardrail_status"] == "allow"
         assert state["response"] == "results/result_0.json"
 
-    assert parser.calls[0] == "Current request: Show me frames from CTE today."
-    assert parser.calls[1] == "Current request: Show me frames from Tampines Expressway for the whole of August."
-    assert parser.calls[2] == "Current request: Show me frames from MCE on every Tuesday."
-    assert parser.calls[3] == "Current request: Show me frames from Kranji Highway from the 15th to 18th of last month."
-    assert parser.calls[4] == "Current request: Show me PIE frames between 8 AM and 10 AM yesterday."
+    assert parser.calls[0] == "Show me frames from CTE today."
+    assert parser.calls[1] == "Show me frames from Tampines Expressway for the whole of August."
+    assert parser.calls[2] == "Show me frames from MCE on every Tuesday."
+    assert parser.calls[3] == "Show me frames from Kranji Highway from the 15th to 18th of last month."
+    assert parser.calls[4] == "Show me PIE frames between 8 AM and 10 AM yesterday."
 
 
 def test_orchestrator_emits_progress_events_only_for_executed_stages():
@@ -227,7 +230,6 @@ def test_orchestrator_emits_progress_events_only_for_executed_stages():
     events: list[str] = []
     state = orchestrator.run_with_progress(
         "Show me frames from CTE today.",
-        thread_id="thread-progress",
         progress=events.append,
     )
 

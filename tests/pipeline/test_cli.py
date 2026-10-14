@@ -1,8 +1,7 @@
 from pipeline.cli import build_parser
 
 
-def test_cli_parser_accepts_thread_id():
+def test_cli_parser_accepts_no_special_arguments():
     parser = build_parser()
-    args = parser.parse_args(["--thread-id", "thread-123"])
-    assert args.thread_id == "thread-123"
-
+    args = parser.parse_args([])
+    assert vars(args) == {}
